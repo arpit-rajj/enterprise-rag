@@ -60,7 +60,7 @@ The system is designed with a production-ready mindset, separating the fast, sta
 * **Python**: Core programming language.
 * **FastAPI**: High-performance, asynchronous web framework for building the REST API.
 * **PostgreSQL + pgvector**: Relational database used to store both structured document metadata and high-dimensional vector embeddings, eliminating the need for a separate vector database.
-* **Celery & Redis**: Distributed task queue for handling asynchronous document processing (parsing, chunking, and calling OpenAI).
+* **Celery & Redis**: Distributed task queue for handling asynchronous document processing (with exponential backoff and retries). Redis also powers the **semantic cache** using RediSearch to bypass LLM generation for similar queries.
 * **OpenAI API**: Provides the intelligence layer (`text-embedding-3-small` for embeddings and `gpt-4o-mini` for generation).
 * **PyPDF2**: Pure Python library for extracting text from PDF documents.
 * **SQLAlchemy & Alembic**: ORM and database migration tools.
@@ -95,10 +95,11 @@ enterprise-rag-api/
 ### Query / Retrieval
 1. A user submits a question via `POST /api/v1/search/`.
 2. The system generates an embedding for the user's question using OpenAI.
-3. Using `pgvector` and the `<=>` (cosine distance) operator, the system queries the database for the top 5 most semantically similar chunks.
-4. The retrieved chunks are injected into a strict prompt.
-5. The OpenAI Chat API is called to synthesize a final answer based *only* on the provided context.
-6. The answer and the source citations are returned to the user.
+3. The system checks the **Redis Semantic Cache** using a vector similarity search on the query embedding. If a highly similar query was asked recently (similarity ≥ 0.90), the system returns the cached answer instantly.
+4. On a cache miss, using `pgvector` and the `<=>` (cosine distance) operator, the system queries the database for the top 5 most semantically similar chunks.
+5. The retrieved chunks are injected into a strict prompt.
+6. The OpenAI Chat API is called to synthesize a final answer based *only* on the provided context.
+7. The answer and actual similarity scores are returned to the user, and the new answer is saved to the semantic cache asynchronously.
 
 ## Setup
 ### 1. Infrastructure
@@ -141,10 +142,10 @@ uvicorn app.main:app --reload
 ## Database
 We use **PostgreSQL** with the **pgvector** extension. 
 * `documents`: Tracks the file metadata and ingestion status (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
-* `document_chunks`: Stores the actual extracted text chunks, a foreign key to the parent document, and a `Vector(1536)` column for the OpenAI embeddings.
+* `document_chunks`: Stores the actual extracted text chunks, a foreign key to the parent document, and a `Vector(1536)` column for the OpenAI embeddings (optimized with an **HNSW index** to prevent full-table scans at scale).
 
 ## Celery
-Document processing involves reading large files and making external HTTP requests to OpenAI. If done synchronously in the FastAPI route, it would block the event loop and lead to poor performance or timeouts. **Celery** offloads this work to a separate process, using **Redis** as the message broker.
+Document processing involves reading large files and making external HTTP requests to OpenAI. If done synchronously in the FastAPI route, it would block the event loop and lead to poor performance or timeouts. **Celery** offloads this work to a separate process, using **Redis** as the message broker. The processing tasks are configured with **exponential backoff and retries** (`self.retry(...)`) to gracefully handle temporary API failures from OpenAI without dropping documents.
 
 ## API Endpoints
 * `POST /api/v1/documents/upload`: Upload a document for asynchronous processing.
@@ -160,6 +161,10 @@ pytest tests/
 ## Design Decisions
 See `docs/architecture.md` and `docs/interview-preparation.md` for in-depth explanations of why specific technologies (FastAPI, pgvector, Celery) were chosen over alternatives.
 
+### Semantic Caching Trade-off
+To reduce LLM latency and API costs, this system implements a semantic cache in Redis. When a user asks a question, we embed the query and perform a vector search against previously answered queries. 
+**Trade-off:** Higher similarity thresholds reduce incorrect cache reuse but lower the hit rate; lower thresholds improve hit rate at the risk of returning an answer generated for a meaningfully different query. The current threshold is configured to `0.90`, balancing strictness with cache utility.
+
 ## Limitations
 * **Basic Chunking**: The current chunking strategy splits by character length. A semantic chunker (e.g., splitting by markdown headers or logical sections) would improve retrieval quality.
 * **Basic Retrieval**: The system uses naive Top-K cosine similarity. 
@@ -168,4 +173,3 @@ See `docs/architecture.md` and `docs/interview-preparation.md` for in-depth expl
 * **Hybrid Search**: Combine vector search with full-text keyword search (BM25) using PostgreSQL's native text search features.
 * **Reranking**: Implement a cross-encoder model (like Cohere Rerank) to re-order the retrieved chunks before passing them to the LLM.
 * **Authentication**: Add JWT-based authentication and multi-tenancy so users can only search their own documents.
-* **Caching**: Cache identical semantic queries using Redis to save OpenAI API costs.

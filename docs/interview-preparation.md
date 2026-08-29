@@ -1,52 +1,48 @@
-# Interview Preparation Guide
+# Engineering Decisions & Trade-offs
 
-This document is designed to help you prepare for technical interviews regarding the Enterprise Document Retrieval API (RAG) project.
+This document outlines the core architectural and engineering decisions made in the Enterprise Document Retrieval API (RAG), including the rationale behind them and the explicit trade-offs accepted.
 
-## 1. Project Explanation
+## 1. Web Framework: FastAPI
 
-### The "Elevator Pitch" (30 Seconds)
-"I built an Enterprise Document Retrieval API, which is an asynchronous RAG backend. It allows users to upload unstructured corporate documents, processes them in the background using Celery, and enables semantic search over the contents using PostgreSQL with pgvector. The system uses OpenAI for embeddings and answer generation, all wrapped in a clean FastAPI REST interface."
+**Decision**: Build the REST API using FastAPI.
+**Why**: We need high concurrency for API endpoints and native asynchronous support to integrate smoothly with the async ecosystem. FastAPI provides automatic OpenAPI docs, built-in validation via Pydantic, and extremely high performance.
+**Alternative considered**: Django / Django REST Framework.
+**Trade-off**: While Django provides a massive ecosystem and a built-in admin panel, its synchronous nature (historically) and heavier footprint make it less ideal for a lean, I/O-heavy microservice. We trade the batteries-included ecosystem for raw async performance.
+**Current limitation**: No built-in admin panel to manage documents or users.
+**Future improvement**: Implement a custom admin dashboard using a modern frontend framework like React or Vue.
 
-### The "Detailed Pitch" (2 Minutes)
-"In my RAG project, I focused on building a production-like architecture rather than just a quick script. When a document is uploaded, the FastAPI backend immediately acknowledges the request and offloads the heavy processing—text extraction, chunking, and embedding generation—to a Celery worker backed by Redis. This keeps the API highly responsive. 
+## 2. Database & Vector Search: PostgreSQL + pgvector
 
-For the data layer, I used PostgreSQL. Instead of spinning up a separate vector database like Pinecone, I used the `pgvector` extension. This allowed me to keep document metadata and vector embeddings in the same relational database, simplifying transactions and backups. 
+**Decision**: Use PostgreSQL with the `pgvector` extension for both metadata and vector storage.
+**Why**: RAG applications require querying both structured data (document ownership, upload status) and unstructured data (vector embeddings). Using a single database guarantees ACID compliance, simplifies backups, and avoids the "split-brain" problem of syncing a relational database with a dedicated vector database.
+**Alternative considered**: PostgreSQL + Pinecone (or Milvus).
+**Trade-off**: Specialized vector databases like Pinecone might offer slightly lower latency at massive scale (billions of vectors) and out-of-the-box SaaS convenience. We trade extreme scale performance for operational simplicity and data consistency.
+**Current limitation**: `pgvector` requires manual tuning of indexes (like `m` and `ef_construction` for HNSW) as the dataset grows.
+**Future improvement**: Implement partitioning on the `document_chunks` table to keep index sizes manageable as the system scales to hundreds of millions of chunks.
 
-During the query phase, the system vectorizes the user's question, uses pgvector's cosine distance operator to retrieve the most relevant chunks, and injects them into a strict prompt for an LLM to generate an answer. I specifically designed the system to return source citations with the answers to ensure traceability."
+## 3. Asynchronous Processing: Celery + Redis
 
-## 2. Design Decisions & Trade-offs
+**Decision**: Offload document ingestion (PDF parsing, chunking, and embedding generation) to Celery background workers.
+**Why**: Document processing is I/O-bound and slow. Doing it synchronously in a FastAPI route would block the event loop, cause HTTP timeouts, and lead to a poor user experience. Celery allows us to return a `202 Accepted` immediately, process the file asynchronously, and automatically retry on transient OpenAI API failures using exponential backoff.
+**Alternative considered**: FastAPI `BackgroundTasks`.
+**Trade-off**: Celery requires running a separate message broker (Redis) and worker processes, increasing infrastructure complexity. `BackgroundTasks` are simpler but lack persistence; if the FastAPI server restarts, pending tasks are lost. We trade simplicity for durability and scalability.
+**Current limitation**: RabbitMQ might be a more robust message broker for Celery than Redis for complex routing, but Redis was chosen to double as our semantic cache.
+**Future improvement**: Implement Celery task routing to dedicate specific workers to heavy PDF parsing vs. lightweight text processing.
 
-### Why FastAPI?
-**Reason**: High performance, built-in asynchronous support, automatic validation via Pydantic, and automatic OpenAPI documentation.
-**Trade-off**: Smaller ecosystem compared to Django, but for an API-first backend, the speed and typing benefits far outweigh the lack of built-in admin panels.
+## 4. Chunking Strategy: Character Chunking
 
-### Why PostgreSQL + pgvector? (Crucial Question)
-**Reason**: Standard vector databases (Pinecone, Milvus) add significant operational overhead (another service to monitor, secure, and sync). By using `pgvector`, we can do a relational join between our document metadata and the vectors in a single query. It is ACID compliant and simplifies the stack.
-**Trade-off**: Specialized vector DBs might offer slightly lower latency at massive scale (billions of vectors), but for typical enterprise workloads, `pgvector` with HNSW or IVFFlat indexes is more than sufficient.
+**Decision**: Split text into chunks using a simple character-based approach.
+**Why**: To prevent exceeding the LLM's context window, we must break large documents into smaller pieces. A basic character splitter is simple to implement and understand as a baseline.
+**Alternative considered**: Semantic chunking (e.g., splitting by markdown headers, sentences, or logical sections).
+**Trade-off**: Character splitting is fast and predictable but often splits concepts or sentences in half, reducing the quality of the retrieved context.
+**Current limitation**: Retrieved chunks may lack necessary surrounding context if a concept spans a chunk boundary.
+**Future improvement**: Implement a true recursive semantic chunker that respects document structure (paragraphs, sentences) to improve retrieval relevance.
 
-### Why Celery + Redis?
-**Reason**: Document processing (PDF parsing, API calls to OpenAI for embeddings) is I/O bound and slow. Doing it synchronously in a FastAPI request would cause timeouts and poor UX. Celery handles retries and scales horizontally.
-**Trade-off**: Requires running and maintaining a Redis broker and a separate worker process.
+## 5. Semantic Caching (Redis)
 
-### Why Recursive Character Chunking?
-**Reason**: We need to keep chunks within the context limit of the LLM while retaining semantic meaning. Splitting by paragraphs/sentences (recursive splitting) is better than naive character splitting which cuts words in half.
-
-## 3. Potential Interview Questions
-
-* **"What happens if the OpenAI API goes down during ingestion?"**
-  * *Answer*: Because the ingestion is handled by Celery, the task will fail and can be automatically retried with exponential backoff. The document status in PostgreSQL will reflect `FAILED` if all retries are exhausted, allowing the user to try again later.
-
-* **"How would you scale this system?"**
-  * *Answer*: 
-    1. **API**: Run multiple FastAPI instances behind a load balancer.
-    2. **Workers**: Spin up more Celery worker nodes to process documents in parallel.
-    3. **Database**: Add read replicas for the query endpoints, keeping the primary DB for writes (ingestion).
-
-* **"How do you handle security for corporate documents?"**
-  * *Answer*: 
-    1. **Data at rest**: Encrypt the PostgreSQL volumes and the temporary upload storage.
-    2. **Data in transit**: Enforce TLS/HTTPS.
-    3. **Access Control**: Implement JWT authentication to ensure users can only query documents they have permission to see (e.g., adding a `tenant_id` column to the Document table).
-
-* **"Why did you use Cosine Similarity instead of Euclidean Distance?"**
-  * *Answer*: OpenAI embeddings are normalized. For normalized vectors, cosine similarity and Euclidean distance yield the same ranking. However, cosine similarity is standard for text embeddings because it measures the angle between vectors (semantic meaning) rather than magnitude.
+**Decision**: Implement a semantic cache using Redis Vector Search (RediSearch).
+**Why**: To reduce OpenAI API costs and response latency. When a user asks a question, we embed it and search Redis for previously asked queries with a similarity ≥ 0.90. If a match is found, we return the cached LLM answer instantly, bypassing pgvector and the OpenAI chat completion call.
+**Alternative considered**: Exact string matching caching (e.g., standard Redis `GET`).
+**Trade-off**: Higher similarity thresholds reduce incorrect cache reuse but lower the hit rate; lower thresholds improve hit rate at the risk of returning an answer generated for a meaningfully different query. We trade deterministic exact-match accuracy for broader cache utility, requiring empirical tuning of the threshold (currently 0.90).
+**Current limitation**: The cache does not currently invalidate if the underlying documents are updated or deleted.
+**Future improvement**: Implement cache invalidation logic based on document updates to ensure stale answers are not served.

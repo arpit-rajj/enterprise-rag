@@ -34,3 +34,10 @@ celerybeat.pid
 # Documents
 documents/
 uploads/
+
+# Data Volumes
+postgres_data/
+redis_data/
+
+# OS
+.DS_Store

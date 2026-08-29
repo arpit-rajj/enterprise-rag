@@ -1,23 +1,23 @@
-from typing import List
+from typing import List, Tuple
 import openai
 from sqlalchemy.orm import Session
 from app.db.models import DocumentChunk, Document
-from app.services.embeddings import generate_embedding
 from app.core.config import settings
 from app.core.logging import logger
 
 client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
 
-def search_chunks(db: Session, query: str, top_k: int = 5) -> List[DocumentChunk]:
+def search_chunks(db: Session, query_embedding: List[float], top_k: int = 5) -> List[Tuple[DocumentChunk, float]]:
     """
     Performs vector similarity search on document chunks using pgvector.
     We use cosine similarity/distance for text embeddings.
     pgvector uses the <=> operator for cosine distance.
     """
-    query_embedding = generate_embedding(query)
-    
     # We order by cosine distance (embedding <=> query_embedding)
-    results = db.query(DocumentChunk).order_by(
+    results = db.query(
+        DocumentChunk,
+        DocumentChunk.embedding.cosine_distance(query_embedding).label("distance")
+    ).order_by(
         DocumentChunk.embedding.cosine_distance(query_embedding)
     ).limit(top_k).all()
     

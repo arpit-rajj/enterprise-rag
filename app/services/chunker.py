@@ -1,6 +1,6 @@
 from typing import List
 
-class RecursiveCharacterTextSplitter:
+class CharacterTextSplitter:
     """
     A simple implementation of recursive character text splitting.
     Splits text by double newlines, then newlines, then spaces, then characters

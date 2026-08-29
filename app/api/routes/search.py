@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List
 from app.api.dependencies import get_db
 from app.services.retrieval import search_chunks, generate_rag_answer
+from app.services.embeddings import generate_embedding
+from app.services.semantic_cache import semantic_cache
 
 router = APIRouter()
 
@@ -22,37 +24,41 @@ class SearchResponse(BaseModel):
     sources: List[SourceResponse]
 
 @router.post("/", response_model=SearchResponse)
-async def search_documents(request: SearchRequest, db: Session = Depends(get_db)):
+async def search_documents(request: SearchRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     try:
-        # 1. Retrieve relevant chunks
-        chunks = search_chunks(db, request.query, request.top_k)
+        # 1. Generate query embedding once
+        query_embedding = generate_embedding(request.query)
+
+        # 2. Check semantic cache
+        cached_answer = semantic_cache.get_cached_answer(query_embedding)
+        if cached_answer:
+            return SearchResponse(answer=cached_answer, sources=[])
+
+        # 3. Retrieve relevant chunks
+        results = search_chunks(db, query_embedding, request.top_k)
         
-        # 2. Generate answer
-        contexts = [chunk.text_content for chunk in chunks]
+        # 4. Generate answer
+        contexts = [chunk.text_content for chunk, _ in results]
         answer = generate_rag_answer(request.query, contexts) if contexts else "No relevant documents found in the database."
         
-        # 3. Format sources
-        # We need query embedding to calculate similarity score for the response
-        from app.services.embeddings import generate_embedding
-        query_embedding = generate_embedding(request.query)
-        
+        # 5. Format sources
         sources = []
-        for chunk in chunks:
-            # We fetch the document to get the filename. 
-            # In a highly optimized setup, we could join this in the search query.
+        for chunk, distance in results:
             doc_filename = chunk.document.filename if chunk.document else "Unknown"
+            similarity = max(0.0, 1.0 - distance)
             
-            # Since SQLAlchemy pgvector returns distance, we can approximate similarity 
-            # 1 - cosine_distance = cosine_similarity
-            # For exact math, we would re-calculate or fetch the annotated distance from the query.
             sources.append(
                 SourceResponse(
                     document_id=chunk.document_id,
                     filename=doc_filename,
                     chunk_index=chunk.chunk_index,
-                    similarity=1.0 # Placeholder for simplicity in output, could be replaced with actual cosine similarity
+                    similarity=similarity
                 )
             )
+            
+        # 6. Save to cache asynchronously
+        if contexts:
+            background_tasks.add_task(semantic_cache.set_cached_answer, query_embedding, answer)
             
         return SearchResponse(
             answer=answer,
