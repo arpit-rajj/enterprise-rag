@@ -42,5 +42,5 @@ redis_data/
 # OS
 .DS_Store
 
-architecture.md
-interview-preparation.md
+# Docs
+docs/
