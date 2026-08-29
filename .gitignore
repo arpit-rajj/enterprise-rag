@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment variables
+.env
+.env.local
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Documents
+documents/
+uploads/

@@ -1,0 +1,27 @@
+# FastAPI & Web
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Database
+SQLAlchemy==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9
+pgvector==0.2.5
+
+# Async Processing
+celery==5.3.6
+redis==5.0.1
+
+# AI & Document Processing
+openai==1.12.0
+tiktoken==0.6.0
+PyPDF2==3.0.1  # For pure python PDF extraction
+
+# Testing & Dev
+pytest==8.0.0
+httpx==0.26.0
+black==24.1.1
+isort==5.13.2
