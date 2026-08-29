@@ -42,5 +42,3 @@ redis_data/
 # OS
 .DS_Store
 
-# Docs
-docs/
